@@ -99,21 +99,27 @@ class TerminalDataReceiver: DataReceiver {
     }
 
     func onData(data: [UInt8]) {
-        // Feed the TerminalView (not bare Terminal) so SwiftTerm runs feedPrepare/
-        // feedFinish and schedules display updates immediately.
-        terminalView?.feed(byteArray: data[...])
-
-        // Force a repaint when we receive erase-to-end-of-line traffic so stale
-        // glyphs do not linger visually after backspace.
         let containsEraseControl = data.contains(0x08) && data.contains(0x4B)
-        if containsEraseControl, let terminalView {
-            if Thread.isMainThread {
+
+        let applyDataToTerminal = { [weak terminalView] in
+            guard let terminalView else { return }
+            // Feed the TerminalView (not bare Terminal) so SwiftTerm runs
+            // feedPrepare/feedFinish and schedules display updates immediately.
+            terminalView.feed(byteArray: data[...])
+
+            // Force a repaint when we receive erase-to-end-of-line traffic so
+            // stale glyphs do not linger visually after backspace.
+            if containsEraseControl {
                 terminalView.setNeedsDisplay(terminalView.bounds)
-            } else {
-                DispatchQueue.main.async {
-                    terminalView.setNeedsDisplay(terminalView.bounds)
-                }
             }
+        }
+
+        // Rust callbacks arrive on a Tokio worker thread. SwiftTerm mutates
+        // UIKit state during feed(), so all terminal updates must run on main.
+        if Thread.isMainThread {
+            applyDataToTerminal()
+        } else {
+            DispatchQueue.main.async(execute: applyDataToTerminal)
         }
     }
 
