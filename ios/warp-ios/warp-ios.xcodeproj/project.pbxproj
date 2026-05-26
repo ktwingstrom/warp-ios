@@ -27,25 +27,9 @@
 		EBDF5B072FC40F0F00B51FCA /* warp-ios.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "warp-ios.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
-/* Begin PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
-		EBDF5B3D2FC412F400B51FCA /* Exceptions for "warp-ios" folder in "Embed Frameworks" phase from "warp-ios" target */ = {
-			isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
-			attributesByRelativePath = {
-				WarpApp/WarpIOSBridge.xcframework = (CodeSignOnCopy, RemoveHeadersOnCopy, );
-			};
-			buildPhase = EBDF5B372FC4107000B51FCA /* Embed Frameworks */;
-			membershipExceptions = (
-				WarpApp/WarpIOSBridge.xcframework,
-			);
-		};
-/* End PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
-
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		EBDF5B092FC40F0F00B51FCA /* warp-ios */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				EBDF5B3D2FC412F400B51FCA /* Exceptions for "warp-ios" folder in "Embed Frameworks" phase from "warp-ios" target */,
-			);
 			path = "warp-ios";
 			sourceTree = "<group>";
 		};
