@@ -1,0 +1,4 @@
+module warp_ios_bridgeFFI {
+    header "warp_ios_bridgeFFI.h"
+    export *
+}

@@ -1,0 +1,34 @@
+namespace warp_ios_bridge {
+    // Call at app startup to pre-warm the Tokio runtime so the first SSH
+    // connection doesn't pay the initialization cost.
+    void initialize_bridge();
+
+    [Throws=SshError, Async]
+    SshSession ssh_connect_with_password(string host, u16 port, string username, string password);
+
+    [Throws=SshError, Async]
+    SshSession ssh_connect_with_key(string host, u16 port, string username, string private_key_pem);
+};
+
+[Error]
+enum SshError {
+    "ConnectionFailed",
+    "AuthFailed",
+    "ChannelError",
+    "Disconnected",
+    "InvalidKey",
+};
+
+callback interface DataReceiver {
+    void on_data(sequence<u8> data);
+    void on_disconnect(string reason);
+};
+
+interface SshSession {
+    void send_data(sequence<u8> data);
+    void resize(u16 cols, u16 rows);
+    void set_receiver(DataReceiver receiver);
+
+    [Async]
+    void disconnect();
+};

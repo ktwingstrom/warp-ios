@@ -1,0 +1,24 @@
+[package]
+name = "warp_ios_bridge"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib", "cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+uniffi = { version = "0.28", features = ["tokio", "cli"] }
+russh = "0.44"
+russh-keys = "0.44"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros"] }
+thiserror = "2"
+log = "0.4"
+async-trait = "0.1"
+once_cell = "1"
+
+[build-dependencies]
+uniffi = { version = "0.28", features = ["build"] }
