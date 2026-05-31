@@ -33,6 +33,7 @@ class SSHSession {
     private(set) var richHistorySelectionIndex = 0
     private(set) var currentInputBuffer = ""
     private var richHistoryNeedsRefresh = true
+    private var localHistoryStorageKey: String?
     private enum PromptFeedState {
         case interactive
         case runningBlock
@@ -44,6 +45,9 @@ class SSHSession {
         blockStore.reset()
         promptFeedState = .interactive
         resetRichHistoryState()
+        localHistoryStorageKey = historyStorageKey(for: host)
+        blockStore.commandHistory = loadPersistedTypingHistory()
+        seedRichHistoryFromLocalTypingHistory()
         promptUsername = host.username
         promptHostname = host.hostname
         awaitingRemotePromptEcho = false
@@ -96,9 +100,11 @@ class SSHSession {
 
     // Called by the Rust bridge when the remote session ends (channel EOF/close).
     func handleRemoteDisconnect() {
+        persistTypingHistory()
         isConnected = false
         rustSession = nil
         warpSessionController = nil
+        localHistoryStorageKey = nil
         resetRichHistoryState()
     }
 
@@ -194,15 +200,18 @@ class SSHSession {
     }
 
     func disconnect() async {
+        persistTypingHistory()
         await rustSession?.disconnect()
         isConnected = false
         rustSession = nil
         warpSessionController = nil
+        localHistoryStorageKey = nil
         resetRichHistoryState()
     }
 
     func handlePreexecEvent() {
         trace("hook preexec activeBlock=\(String(describing: blockStore.activeBlockID))")
+        persistTypingHistory()
         richHistoryVisible = false
         currentInputBuffer = ""
         promptFeedState = .runningBlock
@@ -447,6 +456,52 @@ class SSHSession {
         return merged
     }
 
+    private func seedRichHistoryFromLocalTypingHistory() {
+        let localHistory = compactedHistory(commands: blockStore.commandHistory)
+        richHistoryItems = localHistory.enumerated().map { RichHistoryItem(id: $0.offset, command: $0.element) }
+    }
+
+    private func persistTypingHistory() {
+        guard let key = localHistoryStorageKey else { return }
+        let compacted = compactedHistory(commands: blockStore.commandHistory)
+        blockStore.commandHistory = compacted
+        guard let encoded = try? JSONEncoder().encode(compacted) else { return }
+        UserDefaults.standard.set(encoded, forKey: key)
+    }
+
+    private func loadPersistedTypingHistory() -> [String] {
+        guard let key = localHistoryStorageKey,
+              let encoded = UserDefaults.standard.data(forKey: key),
+              let decoded = try? JSONDecoder().decode([String].self, from: encoded)
+        else {
+            return []
+        }
+        return compactedHistory(commands: decoded)
+    }
+
+    private func historyStorageKey(for host: SSHHost) -> String {
+        let scope = "\(host.username.lowercased())@\(host.hostname.lowercased()):\(host.port)"
+        return "ssh_local_typing_history_\(scope)"
+    }
+
+    private func compactedHistory(commands: [String]) -> [String] {
+        var seen = Set<String>()
+        var newestFirst: [String] = []
+
+        for command in commands.reversed() {
+            let normalized = normalizeHistoryCommand(command)
+            guard !normalized.isEmpty, !isInternalHistoryCommand(normalized) else { continue }
+            if seen.insert(normalized).inserted {
+                newestFirst.append(normalized)
+            }
+            if newestFirst.count >= maxHistoryItems {
+                break
+            }
+        }
+
+        return newestFirst.reversed()
+    }
+
     private func normalizeHistoryCommand(_ command: String) -> String {
         var normalized = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else { return "" }
@@ -471,6 +526,23 @@ class SSHSession {
     }
 
     private func isInternalHistoryCommand(_ command: String) -> Bool {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+
+        // Shell startup/teardown probes from distro profile scripts can leak
+        // into remote history snapshots; keep recall focused on user commands.
+        if lower.hasPrefix("/usr/bin/clear_console")
+            || lower.hasPrefix("clear_console")
+            || lower.contains("clear_console -q") {
+            return true
+        }
+
+        if lower.hasPrefix("["),
+           lower.hasSuffix("]"),
+           (lower.contains("shlvl") || lower.contains("clear_console")) {
+            return true
+        }
+
         let internalNeedles = [
             "__warp_ios_",
             "PROMPT_COMMAND",
