@@ -307,6 +307,13 @@ typedef void (*UniffiCallbackInterfaceSessionEventReceiverMethod5)(uint64_t, Rus
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_SESSION_EVENT_RECEIVER_METHOD6
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_SESSION_EVENT_RECEIVER_METHOD6
+typedef void (*UniffiCallbackInterfaceSessionEventReceiverMethod6)(uint64_t, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_DATA_RECEIVER
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_DATA_RECEIVER
 typedef struct UniffiVTableCallbackInterfaceDataReceiver {
@@ -324,7 +331,8 @@ typedef struct UniffiVTableCallbackInterfaceSessionEventReceiver {
     UniffiCallbackInterfaceSessionEventReceiverMethod2 _Nonnull onCommandFinished;
     UniffiCallbackInterfaceSessionEventReceiverMethod3 _Nonnull onPrecmd;
     UniffiCallbackInterfaceSessionEventReceiverMethod4 _Nonnull onOutputChunk;
-    UniffiCallbackInterfaceSessionEventReceiverMethod5 _Nonnull onStatus;
+    UniffiCallbackInterfaceSessionEventReceiverMethod5 _Nonnull onHistorySnapshot;
+    UniffiCallbackInterfaceSessionEventReceiverMethod6 _Nonnull onStatus;
     UniffiCallbackInterfaceFree _Nonnull uniffiFree;
 } UniffiVTableCallbackInterfaceSessionEventReceiver;
 
@@ -342,6 +350,11 @@ void uniffi_warp_ios_bridge_fn_free_sshsession(void*_Nonnull ptr, RustCallStatus
 #ifndef UNIFFI_FFIDEF_UNIFFI_WARP_IOS_BRIDGE_FN_METHOD_SSHSESSION_DISCONNECT
 #define UNIFFI_FFIDEF_UNIFFI_WARP_IOS_BRIDGE_FN_METHOD_SSHSESSION_DISCONNECT
 uint64_t uniffi_warp_ios_bridge_fn_method_sshsession_disconnect(void*_Nonnull ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WARP_IOS_BRIDGE_FN_METHOD_SSHSESSION_REQUEST_HISTORY
+#define UNIFFI_FFIDEF_UNIFFI_WARP_IOS_BRIDGE_FN_METHOD_SSHSESSION_REQUEST_HISTORY
+void uniffi_warp_ios_bridge_fn_method_sshsession_request_history(void*_Nonnull ptr, uint32_t limit, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WARP_IOS_BRIDGE_FN_METHOD_SSHSESSION_RESIZE
@@ -694,6 +707,12 @@ uint16_t uniffi_warp_ios_bridge_checksum_method_sshsession_disconnect(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WARP_IOS_BRIDGE_CHECKSUM_METHOD_SSHSESSION_REQUEST_HISTORY
+#define UNIFFI_FFIDEF_UNIFFI_WARP_IOS_BRIDGE_CHECKSUM_METHOD_SSHSESSION_REQUEST_HISTORY
+uint16_t uniffi_warp_ios_bridge_checksum_method_sshsession_request_history(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WARP_IOS_BRIDGE_CHECKSUM_METHOD_SSHSESSION_RESIZE
 #define UNIFFI_FFIDEF_UNIFFI_WARP_IOS_BRIDGE_CHECKSUM_METHOD_SSHSESSION_RESIZE
 uint16_t uniffi_warp_ios_bridge_checksum_method_sshsession_resize(void
@@ -757,6 +776,12 @@ uint16_t uniffi_warp_ios_bridge_checksum_method_sessioneventreceiver_on_precmd(v
 #ifndef UNIFFI_FFIDEF_UNIFFI_WARP_IOS_BRIDGE_CHECKSUM_METHOD_SESSIONEVENTRECEIVER_ON_OUTPUT_CHUNK
 #define UNIFFI_FFIDEF_UNIFFI_WARP_IOS_BRIDGE_CHECKSUM_METHOD_SESSIONEVENTRECEIVER_ON_OUTPUT_CHUNK
 uint16_t uniffi_warp_ios_bridge_checksum_method_sessioneventreceiver_on_output_chunk(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WARP_IOS_BRIDGE_CHECKSUM_METHOD_SESSIONEVENTRECEIVER_ON_HISTORY_SNAPSHOT
+#define UNIFFI_FFIDEF_UNIFFI_WARP_IOS_BRIDGE_CHECKSUM_METHOD_SESSIONEVENTRECEIVER_ON_HISTORY_SNAPSHOT
+uint16_t uniffi_warp_ios_bridge_checksum_method_sessioneventreceiver_on_history_snapshot(void
     
 );
 #endif

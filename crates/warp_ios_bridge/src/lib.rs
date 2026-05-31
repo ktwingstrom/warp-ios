@@ -31,7 +31,9 @@ pub async fn ssh_connect_with_password(
     password: String,
 ) -> Result<Arc<SshSession>, SshError> {
     RUNTIME
-        .spawn(SshSession::connect_with_password(host, port, username, password))
+        .spawn(SshSession::connect_with_password(
+            host, port, username, password,
+        ))
         .await
         .map_err(|e| SshError::ConnectionFailed(e.to_string()))?
 }
@@ -43,7 +45,12 @@ pub async fn ssh_connect_with_key(
     private_key_pem: String,
 ) -> Result<Arc<SshSession>, SshError> {
     RUNTIME
-        .spawn(SshSession::connect_with_key(host, port, username, private_key_pem))
+        .spawn(SshSession::connect_with_key(
+            host,
+            port,
+            username,
+            private_key_pem,
+        ))
         .await
         .map_err(|e| SshError::ConnectionFailed(e.to_string()))?
 }
@@ -73,6 +80,7 @@ pub trait SessionEventReceiver: Send + Sync {
     fn on_command_finished(&self, exit_code: i32, block_id: u64);
     fn on_precmd(&self, working_directory: String);
     fn on_output_chunk(&self, block_id: u64, data: Vec<u8>);
+    fn on_history_snapshot(&self, encoded: String);
     fn on_status(&self, message: String);
 }
 
@@ -95,6 +103,7 @@ enum EventReceiverState {
 /// Commands sent from Swift → session_runner over an mpsc channel.
 enum SessionCmd {
     Data(Vec<u8>),
+    RequestHistory(u32),
     Resize(u16, u16),
     Disconnect,
 }
@@ -150,6 +159,13 @@ async fn session_runner(
                     Some(SessionCmd::Data(data)) => {
                         if channel.data(data.as_slice()).await.is_err() {
                             // Send failed — channel is already closed by the server.
+                            remote_closed = true;
+                            break;
+                        }
+                    }
+                    Some(SessionCmd::RequestHistory(limit)) => {
+                        let request = history_request_command(limit);
+                        if channel.data(request.as_bytes()).await.is_err() {
                             remote_closed = true;
                             break;
                         }
@@ -217,7 +233,9 @@ async fn session_runner(
     }
 
     // Best-effort SSH-level disconnect (no-op if server already closed).
-    let _ = handle.disconnect(russh::Disconnect::ByApplication, "", "English").await;
+    let _ = handle
+        .disconnect(russh::Disconnect::ByApplication, "", "English")
+        .await;
 }
 
 // Terminal modes:
@@ -231,28 +249,13 @@ const PTY_MODES: &[(russh::Pty, u32)] = &[
 
 #[derive(Clone)]
 enum SessionEvent {
-    Bootstrapped {
-        shell: String,
-        fallback_mode: bool,
-    },
-    Preexec {
-        command: String,
-        block_id: u64,
-    },
-    CommandFinished {
-        exit_code: i32,
-        block_id: u64,
-    },
-    Precmd {
-        working_directory: String,
-    },
-    OutputChunk {
-        block_id: u64,
-        data: Vec<u8>,
-    },
-    Status {
-        message: String,
-    },
+    Bootstrapped { shell: String, fallback_mode: bool },
+    Preexec { command: String, block_id: u64 },
+    CommandFinished { exit_code: i32, block_id: u64 },
+    Precmd { working_directory: String },
+    OutputChunk { block_id: u64, data: Vec<u8> },
+    HistorySnapshot { encoded: String },
+    Status { message: String },
 }
 
 impl SessionEvent {
@@ -268,7 +271,10 @@ impl SessionEvent {
                 block_id,
             } => receiver.on_command_finished(exit_code, block_id),
             SessionEvent::Precmd { working_directory } => receiver.on_precmd(working_directory),
-            SessionEvent::OutputChunk { block_id, data } => receiver.on_output_chunk(block_id, data),
+            SessionEvent::OutputChunk { block_id, data } => {
+                receiver.on_output_chunk(block_id, data)
+            }
+            SessionEvent::HistorySnapshot { encoded } => receiver.on_history_snapshot(encoded),
             SessionEvent::Status { message } => receiver.on_status(message),
         }
     }
@@ -300,10 +306,7 @@ struct OscHookParser {
 enum OscParseState {
     Normal,
     Esc,
-    Osc {
-        payload: Vec<u8>,
-        esc_in_osc: bool,
-    },
+    Osc { payload: Vec<u8>, esc_in_osc: bool },
 }
 
 impl Default for OscParseState {
@@ -330,6 +333,9 @@ enum HookPayload {
         shell: Option<String>,
         #[serde(default)]
         fallback_mode: bool,
+    },
+    HistorySnapshot {
+        encoded: String,
     },
     Status {
         message: String,
@@ -459,14 +465,15 @@ fn handle_incoming_bytes(
                 dispatch_event(event_state, SessionEvent::Preexec { command, block_id });
             }
             HookPayload::CommandFinished { exit_code } => {
-                let block_id = warp_state.current_block_id.unwrap_or_default();
-                dispatch_event(
-                    event_state,
-                    SessionEvent::CommandFinished {
-                        exit_code,
-                        block_id,
-                    },
-                );
+                if let Some(block_id) = warp_state.current_block_id {
+                    dispatch_event(
+                        event_state,
+                        SessionEvent::CommandFinished {
+                            exit_code,
+                            block_id,
+                        },
+                    );
+                }
                 warp_state.current_block_id = None;
             }
             HookPayload::Precmd { pwd } => {
@@ -490,6 +497,9 @@ fn handle_incoming_bytes(
                     },
                 )
             }
+            HookPayload::HistorySnapshot { encoded } => {
+                dispatch_event(event_state, SessionEvent::HistorySnapshot { encoded });
+            }
             HookPayload::Status { message } => {
                 dispatch_event(event_state, SessionEvent::Status { message });
             }
@@ -508,8 +518,8 @@ fn handle_incoming_bytes(
         }
     }
 
-    let should_forward_to_prompt_terminal =
-        !warp_state.suppress_passthrough_until_bootstrapped && warp_state.current_block_id.is_none();
+    let should_forward_to_prompt_terminal = !warp_state.suppress_passthrough_until_bootstrapped
+        && warp_state.current_block_id.is_none();
 
     if passthrough.is_empty() || !should_forward_to_prompt_terminal {
         return;
@@ -555,6 +565,11 @@ fn dispatch_event(event_state: &Arc<StdMutex<EventReceiverState>>, event: Sessio
     }
 }
 
+fn history_request_command(limit: u32) -> String {
+    // Trailing carriage return executes in the interactive shell.
+    format!("__warp_ios_request_history {}\r", limit.max(1))
+}
+
 fn normalize_private_key_pem(raw_key: &str) -> String {
     let mut key = raw_key.replace("\r\n", "\n").replace('\r', "\n");
     if key.contains("\\n") && !key.contains('\n') {
@@ -578,7 +593,10 @@ impl SshSession {
     }
 
     async fn install_warp_hooks(channel: &russh::Channel<client::Msg>) -> bool {
-        channel.data(WARP_HOOK_BOOTSTRAP_SCRIPT.as_bytes()).await.is_ok()
+        channel
+            .data(WARP_HOOK_BOOTSTRAP_SCRIPT.as_bytes())
+            .await
+            .is_ok()
     }
 
     async fn connect_with_password(
@@ -665,8 +683,8 @@ impl SshSession {
             .map_err(|e| SshError::ConnectionFailed(e.to_string()))?;
 
         let normalized_key = normalize_private_key_pem(&private_key_pem);
-        let key_pair =
-            russh_keys::decode_secret_key(&normalized_key, None).map_err(|_| SshError::InvalidKey)?;
+        let key_pair = russh_keys::decode_secret_key(&normalized_key, None)
+            .map_err(|_| SshError::InvalidKey)?;
 
         let authenticated = handle
             .authenticate_publickey(username, Arc::new(key_pair))
@@ -736,6 +754,10 @@ impl SshSession {
         let _ = self.cmd_tx.send(SessionCmd::Data(data));
     }
 
+    pub fn request_history(&self, limit: u32) {
+        let _ = self.cmd_tx.send(SessionCmd::RequestHistory(limit));
+    }
+
     pub fn resize(&self, cols: u16, rows: u16) {
         let _ = self.cmd_tx.send(SessionCmd::Resize(cols, rows));
     }
@@ -795,6 +817,7 @@ impl SshSession {
 
 const WARP_HOOK_BOOTSTRAP_SCRIPT: &str = r#"__warp_ios_emit() { printf '\033]9278;%s\007' "$1"; }
 __warp_ios_ready=0
+__warp_ios_history_command_limit=200
 __warp_ios_escape() {
   local value="$1"
   value=${value//\\/\\\\}
@@ -819,8 +842,64 @@ __warp_ios_emit_precmd() {
   __warp_ios_emit "{\"hook\":\"CommandFinished\",\"exit_code\":$status}"
   __warp_ios_emit "{\"hook\":\"Precmd\",\"pwd\":\"$escaped_pwd\"}"
 }
+__warp_ios_emit_history_snapshot() {
+  local encoded="$1"
+  __warp_ios_emit "{\"hook\":\"HistorySnapshot\",\"encoded\":\"$encoded\"}"
+}
+__warp_ios_collect_history_lines() {
+  local limit="$1"
+  if [ -z "$limit" ]; then
+    limit="$__warp_ios_history_command_limit"
+  fi
+  if [ -n "${ZSH_VERSION:-}" ]; then
+    {
+      fc -ln -"$limit" 2>/dev/null
+      if [ -n "${HISTFILE:-}" ] && [ -r "${HISTFILE:-}" ]; then
+        tail -n "$limit" "$HISTFILE" 2>/dev/null | sed -E 's/^: [0-9]+:[0-9]+;//'
+      fi
+    } | sed 's/\r$//'
+  elif [ -n "${BASH_VERSION:-}" ]; then
+    history -a 2>/dev/null || true
+    {
+      history "$limit" 2>/dev/null | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+//'
+      if [ -n "${HISTFILE:-}" ] && [ -r "${HISTFILE:-}" ]; then
+        tail -n "$limit" "$HISTFILE" 2>/dev/null
+      fi
+    } | sed 's/\r$//'
+  else
+    return 0
+  fi
+}
+__warp_ios_request_history() {
+  local limit="$1"
+  if [ -z "$limit" ]; then
+    limit="$__warp_ios_history_command_limit"
+  fi
+  local encoded
+  encoded="$(__warp_ios_collect_history_lines "$limit" \
+    | sed '/^[[:space:]]*$/d' \
+    | sed '/^__warp_ios_/d' \
+    | sed '/__warp_ios_/d' \
+    | sed '/PROMPT_COMMAND/d' \
+    | sed '/add-zsh-hook/d' \
+    | sed '/autoload -Uz add-zsh-hook/d' \
+    | sed '/^stty erase '\''\^H'\'' echo echoe 2>\\/dev\\/null$/d' \
+    | sed '/^if \[ -n "\${ZSH_VERSION:-}" \]; then/d' \
+    | sed '/^elif \[ -n "\${BASH_VERSION:-}" \]; then/d' \
+    | sed '/^else$/d' \
+    | sed '/^fi$/d' \
+    | sed '/^\[ -n "\${ZSH_VERSION:-}" \]$/d' \
+    | sed '/^\[ -n "\${BASH_VERSION:-}" \]$/d' \
+    | awk '!seen[$0]++' \
+    | base64 \
+    | tr -d '\r\n')"
+  __warp_ios_emit_history_snapshot "$encoded"
+}
 if [ -n "${ZSH_VERSION:-}" ]; then
   __warp_ios_preexec_zsh() {
+    case "$1" in
+      __warp_ios_*) return ;;
+    esac
     __warp_ios_emit_preexec "$1"
   }
   __warp_ios_precmd_zsh() {
@@ -837,7 +916,7 @@ elif [ -n "${BASH_VERSION:-}" ]; then
   __warp_ios_preexec_bash() {
     [ "$__warp_ios_in_prompt" = "1" ] && return
     case "$BASH_COMMAND" in
-      __warp_ios_emit*|__warp_ios_escape*|__warp_ios_preexec_bash*|__warp_ios_precmd_bash*|history*|trap*|PROMPT_COMMAND*) return ;;
+      __warp_ios_*|history*|trap*|PROMPT_COMMAND*) return ;;
     esac
     __warp_ios_emit_preexec "$BASH_COMMAND"
   }
@@ -862,7 +941,7 @@ fi
 
 #[cfg(test)]
 mod tests {
-    use super::{HookPayload, OscHookParser};
+    use super::{history_request_command, HookPayload, OscHookParser};
 
     #[test]
     fn parses_plain_osc_hook_and_keeps_display_bytes() {
@@ -887,10 +966,7 @@ mod tests {
 
         let (_display, hooks) = parser.consume(input);
 
-        assert_eq!(
-            hooks,
-            vec![HookPayload::CommandFinished { exit_code: 1 }]
-        );
+        assert_eq!(hooks, vec![HookPayload::CommandFinished { exit_code: 1 }]);
     }
 
     #[test]
@@ -902,5 +978,29 @@ mod tests {
 
         assert_eq!(display, input);
         assert!(hooks.is_empty());
+    }
+
+    #[test]
+    fn parses_history_snapshot_payload() {
+        let mut parser = OscHookParser::default();
+        let input = b"\x1b]9278;{\"hook\":\"HistorySnapshot\",\"encoded\":\"Y21kMQpjbWQy\"}\x07";
+
+        let (_display, hooks) = parser.consume(input);
+
+        assert_eq!(
+            hooks,
+            vec![HookPayload::HistorySnapshot {
+                encoded: "Y21kMQpjbWQy".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn request_history_command_is_interactive() {
+        assert_eq!(history_request_command(0), "__warp_ios_request_history 1\r");
+        assert_eq!(
+            history_request_command(250),
+            "__warp_ios_request_history 250\r"
+        );
     }
 }

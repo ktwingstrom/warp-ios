@@ -24,6 +24,15 @@ class SSHSession {
     private var lastSuppressState: Bool?
     private var suppressedBytes = 0
     private var fedBytes = 0
+    private let maxHistoryItems = 250
+    private var richHistoryOriginalBuffer = ""
+    private var richHistoryRequested = false
+    private(set) var richHistoryVisible = false
+    private(set) var richHistoryIsLoading = false
+    private(set) var richHistoryItems: [RichHistoryItem] = []
+    private(set) var richHistorySelectionIndex = 0
+    private(set) var currentInputBuffer = ""
+    private var richHistoryNeedsRefresh = true
     private enum PromptFeedState {
         case interactive
         case runningBlock
@@ -34,6 +43,7 @@ class SSHSession {
     func connect(host: SSHHost, password: String? = nil) async {
         blockStore.reset()
         promptFeedState = .interactive
+        resetRichHistoryState()
         promptUsername = host.username
         promptHostname = host.hostname
         awaitingRemotePromptEcho = false
@@ -89,6 +99,7 @@ class SSHSession {
         isConnected = false
         rustSession = nil
         warpSessionController = nil
+        resetRichHistoryState()
     }
 
     func attachTerminalView(_ terminalView: SwiftTerm.TerminalView) {
@@ -107,6 +118,39 @@ class SSHSession {
         }
     }
 
+    func handleTerminalInput(bytes: [UInt8]) -> Bool {
+        if richHistoryVisible,
+           !isUpArrow(bytes),
+           !isDownArrow(bytes),
+           !isEscape(bytes),
+           !isEnter(bytes) {
+            closeRichHistory(restoreInput: true, reason: "typed-dismiss")
+        }
+
+        if isUpArrow(bytes), isRichHistoryEligible {
+            openOrAdvanceRichHistory()
+            return true
+        }
+
+        if isDownArrow(bytes), richHistoryVisible {
+            moveRichHistorySelectionDown()
+            return true
+        }
+
+        if isEscape(bytes), richHistoryVisible {
+            closeRichHistory(restoreInput: true, reason: "escape")
+            return true
+        }
+
+        if isEnter(bytes), richHistoryVisible {
+            acceptRichHistorySelection()
+            return true
+        }
+
+        updateCurrentInputBuffer(for: bytes)
+        return false
+    }
+
     func send(_ data: Data) {
         if let text = String(data: data, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -116,6 +160,30 @@ class SSHSession {
             trace("send newline bytes=\(data.count)")
         }
         rustSession?.sendData(data: Array(data))
+    }
+
+    func requestRichHistory() {
+        guard !richHistoryIsLoading else { return }
+        guard isRichHistoryEligible else { return }
+        guard let rustSession else { return }
+        richHistoryRequested = true
+        richHistoryIsLoading = true
+        trace("history-menu request limit=\(maxHistoryItems)")
+        rustSession.requestHistory(limit: UInt32(maxHistoryItems))
+    }
+
+    func handleHistorySnapshot(encoded: String) {
+        richHistoryIsLoading = false
+        richHistoryNeedsRefresh = false
+        let decoded = decodeHistoryCommands(encoded: encoded)
+        let merged = mergeWithSessionCommands(remoteCommands: decoded)
+        let oldestToNewest = merged.reversed()
+        richHistoryItems = oldestToNewest.enumerated().map { RichHistoryItem(id: $0.offset, command: $0.element) }
+        if richHistoryVisible {
+            richHistorySelectionIndex = max(0, richHistoryItems.count - 1)
+            previewCurrentHistorySelection()
+        }
+        trace("history-menu snapshot remoteItems=\(decoded.count) mergedItems=\(richHistoryItems.count)")
     }
 
     func resize(cols: UInt16, rows: UInt16) {
@@ -130,10 +198,13 @@ class SSHSession {
         isConnected = false
         rustSession = nil
         warpSessionController = nil
+        resetRichHistoryState()
     }
 
     func handlePreexecEvent() {
         trace("hook preexec activeBlock=\(String(describing: blockStore.activeBlockID))")
+        richHistoryVisible = false
+        currentInputBuffer = ""
         promptFeedState = .runningBlock
         awaitingRemotePromptEcho = false
         if blockStore.isBootstrapped, !blockStore.fallbackModeEnabled {
@@ -143,6 +214,7 @@ class SSHSession {
 
     func handleCommandFinishedEvent() {
         trace("hook command_finished activeBlock=\(String(describing: blockStore.activeBlockID))")
+        richHistoryNeedsRefresh = true
         // Keep suppressing stream bytes until precmd arrives so trailing output
         // does not leak into the prompt area.
         promptFeedState = .awaitingPrecmd
@@ -157,10 +229,14 @@ class SSHSession {
         promptFeedState = .interactive
         awaitingRemotePromptEcho = true
         renderSyntheticPromptInTerminal()
+        if !richHistoryRequested {
+            requestRichHistory()
+        }
         trace("bootstrapped prompt primed")
     }
 
     func handlePrecmdEvent() {
+        currentInputBuffer = ""
         promptFeedState = .interactive
         awaitingRemotePromptEcho = true
         renderSyntheticPromptInTerminal()
@@ -204,6 +280,253 @@ class SSHSession {
     }
 
     private func renderSyntheticPromptInTerminal() {
+        renderPromptWithInput(currentInputBuffer)
+    }
+
+    private var isRichHistoryEligible: Bool {
+        blockStore.isBootstrapped && !blockStore.fallbackModeEnabled
+    }
+
+    private func resetRichHistoryState() {
+        richHistoryVisible = false
+        richHistoryIsLoading = false
+        richHistoryRequested = false
+        richHistoryNeedsRefresh = true
+        richHistoryItems = []
+        richHistorySelectionIndex = 0
+        richHistoryOriginalBuffer = ""
+        currentInputBuffer = ""
+    }
+
+    private func openOrAdvanceRichHistory() {
+        if !richHistoryVisible {
+            richHistoryVisible = true
+            richHistoryOriginalBuffer = currentInputBuffer
+            richHistorySelectionIndex = max(0, richHistoryItems.count - 1)
+            if !richHistoryRequested || richHistoryNeedsRefresh || richHistoryItems.isEmpty {
+                requestRichHistory()
+            }
+            previewCurrentHistorySelection()
+            trace("history-menu open original='\(richHistoryOriginalBuffer)'")
+            return
+        }
+
+        guard !richHistoryItems.isEmpty else { return }
+        let nextIndex = max(0, richHistorySelectionIndex - 1)
+        richHistorySelectionIndex = nextIndex
+        previewCurrentHistorySelection()
+        trace("history-menu navigate direction=up index=\(richHistorySelectionIndex)")
+    }
+
+    private func moveRichHistorySelectionDown() {
+        guard !richHistoryItems.isEmpty else {
+            closeRichHistory(restoreInput: true, reason: "down-empty")
+            return
+        }
+
+        let nextIndex = richHistorySelectionIndex + 1
+        if nextIndex >= richHistoryItems.count {
+            closeRichHistory(restoreInput: true, reason: "down-end")
+            return
+        }
+
+        richHistorySelectionIndex = nextIndex
+        previewCurrentHistorySelection()
+        trace("history-menu navigate direction=down index=\(richHistorySelectionIndex)")
+    }
+
+    private func previewCurrentHistorySelection() {
+        guard richHistoryVisible else { return }
+        guard richHistoryItems.indices.contains(richHistorySelectionIndex) else {
+            if richHistoryVisible {
+                renderPromptWithInput(richHistoryOriginalBuffer)
+            }
+            return
+        }
+        let selected = richHistoryItems[richHistorySelectionIndex].command
+        currentInputBuffer = selected
+        renderPromptWithInput(selected)
+        trace("history-menu preview index=\(richHistorySelectionIndex)")
+    }
+
+    private func acceptRichHistorySelection() {
+        guard richHistoryItems.indices.contains(richHistorySelectionIndex) else {
+            closeRichHistory(restoreInput: true, reason: "accept-empty")
+            return
+        }
+        let command = richHistoryItems[richHistorySelectionIndex].command
+        closeRichHistory(restoreInput: false, reason: "accept")
+        trace("history-menu accept command='\(command)'")
+        executeHistorySelection(command)
+    }
+
+    private func executeHistorySelection(_ command: String) {
+        let bytes = [UInt8(0x15)] + Array(command.utf8) + [UInt8(0x0D)]
+        currentInputBuffer = ""
+        send(Data(bytes))
+    }
+
+    private func closeRichHistory(restoreInput: Bool, reason: String) {
+        guard richHistoryVisible else { return }
+        richHistoryVisible = false
+        if restoreInput {
+            currentInputBuffer = richHistoryOriginalBuffer
+            renderPromptWithInput(richHistoryOriginalBuffer)
+        }
+        trace("history-menu close reason=\(reason)")
+    }
+
+    private func updateCurrentInputBuffer(for bytes: [UInt8]) {
+        guard isRichHistoryEligible else { return }
+        guard !bytes.isEmpty else { return }
+
+        if isEnter(bytes) {
+            currentInputBuffer = ""
+            return
+        }
+
+        if isBackspace(bytes) {
+            if !currentInputBuffer.isEmpty {
+                currentInputBuffer.removeLast()
+            }
+            return
+        }
+
+        if bytes.first == 0x1B {
+            return
+        }
+
+        if let typed = String(bytes: bytes, encoding: .utf8), !typed.isEmpty {
+            currentInputBuffer.append(typed)
+        }
+    }
+
+    private func decodeHistoryCommands(encoded: String) -> [String] {
+        guard let decodedData = Data(base64Encoded: encoded),
+              let text = String(data: decodedData, encoding: .utf8)
+        else {
+            return []
+        }
+
+        let lines = text
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !isInternalHistoryCommand($0) }
+
+        var seen = Set<String>()
+        var result: [String] = []
+        for command in lines.reversed() {
+            if seen.insert(command).inserted {
+                result.append(command)
+            }
+        }
+        return result
+    }
+
+    private func mergeWithSessionCommands(remoteCommands: [String]) -> [String] {
+        var merged: [String] = []
+        var seen = Set<String>()
+
+        for command in remoteCommands {
+            let normalized = normalizeHistoryCommand(command)
+            guard !normalized.isEmpty else { continue }
+            if seen.insert(normalized).inserted {
+                merged.append(normalized)
+            }
+        }
+
+        let sessionCommands = blockStore.commandHistory
+            .reversed()
+            .map(normalizeHistoryCommand)
+            .filter { !$0.isEmpty && !isInternalHistoryCommand($0) }
+
+        for command in sessionCommands where seen.insert(command).inserted {
+            merged.append(command)
+        }
+
+        return merged
+    }
+
+    private func normalizeHistoryCommand(_ command: String) -> String {
+        var normalized = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return "" }
+
+        // Bash preexec reports alias-expanded `ls --color=auto`, sometimes duplicated
+        // when replayed. Normalize history entries back to what users expect to recall.
+        if normalized == "ls --color=auto" {
+            return "ls"
+        }
+        if normalized.hasPrefix("ls ") {
+            let tokens = normalized.split(whereSeparator: \.isWhitespace)
+            if tokens.first == "ls" {
+                let filtered = tokens.filter { $0 != "--color=auto" }
+                if filtered.count == 1 {
+                    return "ls"
+                }
+                normalized = filtered.joined(separator: " ")
+            }
+        }
+
+        return normalized
+    }
+
+    private func isInternalHistoryCommand(_ command: String) -> Bool {
+        let internalNeedles = [
+            "__warp_ios_",
+            "PROMPT_COMMAND",
+            "add-zsh-hook",
+            "autoload -Uz add-zsh-hook",
+            "stty erase '^H' echo echoe",
+            "[ -n \"${ZSH_VERSION:-}\" ]",
+            "[ -n \"${BASH_VERSION:-}\" ]",
+            "case \";${PROMPT_COMMAND};\" in"
+        ]
+        return internalNeedles.contains { command.contains($0) }
+    }
+
+    private func isBackspace(_ bytes: [UInt8]) -> Bool {
+        bytes == [0x08] || bytes == [0x7F]
+    }
+
+    private func isEscape(_ bytes: [UInt8]) -> Bool {
+        bytes == [0x1B]
+    }
+
+    private func isEnter(_ bytes: [UInt8]) -> Bool {
+        bytes == [0x0D] || bytes == [0x0A]
+    }
+
+    private func isUpArrow(_ bytes: [UInt8]) -> Bool {
+        bytes == [0x1B, 0x5B, 0x41] || csiUKeyCode(bytes) == 65
+    }
+
+    private func isDownArrow(_ bytes: [UInt8]) -> Bool {
+        bytes == [0x1B, 0x5B, 0x42] || csiUKeyCode(bytes) == 66
+    }
+
+    private func csiUKeyCode(_ bytes: [UInt8]) -> Int? {
+        guard bytes.count >= 6, bytes.first == 0x1B, bytes[1] == 0x5B, bytes.last == 0x75 else {
+            return nil
+        }
+        let body = String(decoding: bytes.dropFirst(2).dropLast(), as: UTF8.self)
+        let keyCodePart = body.split(separator: ";", maxSplits: 1).first.map(String.init) ?? body
+        return Int(keyCodePart)
+    }
+
+    private func promptPrefix() -> String {
+        let cwd = blockStore.currentWorkingDirectory
+        let dir: String
+        if cwd.isEmpty {
+            dir = "~"
+        } else if cwd == "/" {
+            dir = "/"
+        } else {
+            dir = cwd.split(separator: "/").last.map(String.init) ?? cwd
+        }
+        return "\(promptUsername)@\(promptHostname):\(dir) $ "
+    }
+
+    private func renderPromptWithInput(_ input: String) {
         guard blockStore.isBootstrapped, !blockStore.fallbackModeEnabled else { return }
         guard let terminalView else { return }
         let cols = terminalView.getTerminal().cols
@@ -222,17 +545,8 @@ class SSHSession {
             return
         }
 
-        let cwd = blockStore.currentWorkingDirectory
-        let dir: String
-        if cwd.isEmpty {
-            dir = "~"
-        } else if cwd == "/" {
-            dir = "/"
-        } else {
-            dir = cwd.split(separator: "/").last.map(String.init) ?? cwd
-        }
-        let prompt = "\(promptUsername)@\(promptHostname):\(dir) $ "
-        let bytes = Array(prompt.utf8)
+        let fullPrompt = promptPrefix() + input
+        let bytes = Array(fullPrompt.utf8)
         terminalView.feed(byteArray: [0x1B, 0x5B, 0x32, 0x4A]) // CSI 2J
         terminalView.feed(byteArray: [0x1B, 0x5B, 0x48]) // CSI H
         terminalView.feed(byteArray: [0x0D, 0x1B, 0x5B, 0x32, 0x4B]) // CR + CSI 2K

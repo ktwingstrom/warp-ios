@@ -53,6 +53,12 @@ final class WarpSessionController: SessionEventReceiver {
         }
     }
 
+    func onHistorySnapshot(encoded: String) {
+        DispatchQueue.main.async { [session] in
+            session.handleHistorySnapshot(encoded: encoded)
+        }
+    }
+
     func onStatus(message: String) {
         DispatchQueue.main.async { [store] in
             store.applyStatus(message)
