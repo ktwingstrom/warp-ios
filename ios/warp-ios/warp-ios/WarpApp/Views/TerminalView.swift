@@ -138,10 +138,17 @@ struct TerminalView: UIViewRepresentable {
 
             if ctrlActive, normalized.count == 1,
                let byte = normalized.first, byte >= 0x40 && byte <= 0x7E {
-                session.send(Data([byte & 0x1F]))
+                let controlBytes = [byte & 0x1F]
+                if session.handleTerminalInput(bytes: controlBytes) {
+                    return
+                }
+                session.send(Data(controlBytes))
                 return
             }
 
+            if session.handleTerminalInput(bytes: normalized) {
+                return
+            }
             session.send(Data(normalized))
         }
 

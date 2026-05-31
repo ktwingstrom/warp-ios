@@ -38,6 +38,9 @@ struct KeyAccessoryBar: View {
 
             ForEach(functionKeys, id: \.label) { key in
                 Button {
+                    if session.handleTerminalInput(bytes: key.bytes) {
+                        return
+                    }
                     session.send(Data(key.bytes))
                 } label: {
                     Text(key.label)

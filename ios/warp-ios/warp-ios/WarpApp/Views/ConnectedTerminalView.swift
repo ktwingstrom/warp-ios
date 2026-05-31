@@ -34,9 +34,7 @@ struct ConnectedTerminalView: View {
                         jumpToBottomRequest: 0
                     )
                     .safeAreaInset(edge: .bottom, spacing: 0) {
-                        KeyAccessoryBar(session: session, accessoryState: accessoryState) {
-                            Task { await session.disconnect(); dismiss() }
-                        }
+                        accessoryArea
                     }
                 } else {
                     ScrollViewReader { proxy in
@@ -100,9 +98,7 @@ struct ConnectedTerminalView: View {
                         }
                     }
                     .safeAreaInset(edge: .bottom, spacing: 0) {
-                        KeyAccessoryBar(session: session, accessoryState: accessoryState) {
-                            Task { await session.disconnect(); dismiss() }
-                        }
+                        accessoryArea
                     }
                 }
             } else if let error = session.errorMessage {
@@ -152,6 +148,23 @@ struct ConnectedTerminalView: View {
                 showPasswordPrompt = true
             } else {
                 await session.connect(host: host)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var accessoryArea: some View {
+        VStack(spacing: 0) {
+            if session.richHistoryVisible {
+                RichHistoryMenuView(
+                    items: session.richHistoryItems,
+                    selectionIndex: session.richHistorySelectionIndex,
+                    isLoading: session.richHistoryIsLoading
+                )
+            }
+
+            KeyAccessoryBar(session: session, accessoryState: accessoryState) {
+                Task { await session.disconnect(); dismiss() }
             }
         }
     }

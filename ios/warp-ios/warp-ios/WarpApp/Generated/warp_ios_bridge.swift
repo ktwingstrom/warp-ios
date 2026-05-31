@@ -431,6 +431,22 @@ fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
+    typealias FfiType = UInt32
+    typealias SwiftType = UInt32
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt32 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterInt32: FfiConverterPrimitive {
     typealias FfiType = Int32
     typealias SwiftType = Int32
@@ -532,6 +548,8 @@ public protocol SshSessionProtocol : AnyObject {
     
     func disconnect() async 
     
+    func requestHistory(limit: UInt32) 
+    
     func resize(cols: UInt16, rows: UInt16) 
     
     func sendData(data: [UInt8]) 
@@ -608,6 +626,13 @@ open func disconnect()async  {
             errorHandler: nil
             
         )
+}
+    
+open func requestHistory(limit: UInt32) {try! rustCall() {
+    uniffi_warp_ios_bridge_fn_method_sshsession_request_history(self.uniffiClonePointer(),
+        FfiConverterUInt32.lower(limit),$0
+    )
+}
 }
     
 open func resize(cols: UInt16, rows: UInt16) {try! rustCall() {
@@ -926,6 +951,8 @@ public protocol SessionEventReceiver : AnyObject {
     
     func onOutputChunk(blockId: UInt64, data: [UInt8]) 
     
+    func onHistorySnapshot(encoded: String) 
+    
     func onStatus(message: String) 
     
 }
@@ -1055,6 +1082,30 @@ fileprivate struct UniffiCallbackInterfaceSessionEventReceiver {
                 return uniffiObj.onOutputChunk(
                      blockId: try FfiConverterUInt64.lift(blockId),
                      data: try FfiConverterSequenceUInt8.lift(data)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onHistorySnapshot: { (
+            uniffiHandle: UInt64,
+            encoded: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceSessionEventReceiver.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onHistorySnapshot(
+                     encoded: try FfiConverterString.lift(encoded)
                 )
             }
 
@@ -1279,6 +1330,9 @@ private var initializationResult: InitializationResult = {
     if (uniffi_warp_ios_bridge_checksum_method_sshsession_disconnect() != 46942) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_warp_ios_bridge_checksum_method_sshsession_request_history() != 18537) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_warp_ios_bridge_checksum_method_sshsession_resize() != 63388) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1310,6 +1364,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_warp_ios_bridge_checksum_method_sessioneventreceiver_on_output_chunk() != 18194) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_warp_ios_bridge_checksum_method_sessioneventreceiver_on_history_snapshot() != 9389) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_warp_ios_bridge_checksum_method_sessioneventreceiver_on_status() != 58195) {

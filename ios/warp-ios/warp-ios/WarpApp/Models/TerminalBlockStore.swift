@@ -5,6 +5,7 @@ import Observation
 @Observable
 final class TerminalBlockStore {
     var blocks: [TerminalBlock] = []
+    var commandHistory: [String] = []
     var fallbackModeEnabled = false
     var isBootstrapped = false
     var activeBlockID: UInt64?
@@ -16,6 +17,7 @@ final class TerminalBlockStore {
 
     func reset() {
         blocks.removeAll()
+        commandHistory.removeAll()
         fallbackModeEnabled = false
         isBootstrapped = false
         activeBlockID = nil
@@ -39,6 +41,12 @@ final class TerminalBlockStore {
     func applyPreexec(command: String, blockId: UInt64) {
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        commandHistory.append(trimmed)
+
+        if shouldClearVisibleHistory(command: trimmed) {
+            clearVisibleHistory()
+            return
+        }
 
         if let idx = blocks.firstIndex(where: { $0.id == blockId }) {
             blocks[idx].command = trimmed
@@ -125,5 +133,23 @@ final class TerminalBlockStore {
         )
 
         return cleaned
+    }
+
+    private func clearVisibleHistory() {
+        blocks.removeAll()
+        activeBlockID = nil
+        scrollTick &+= 1
+    }
+
+    private func shouldClearVisibleHistory(command: String) -> Bool {
+        // Treat leading `clear` as a UI clear request (supports flags like `clear -x`).
+        // Intentionally scoped to clear-like first-token commands to avoid matching
+        // strings such as `echo clear`.
+        let firstToken = command
+            .split(whereSeparator: \.isWhitespace)
+            .first?
+            .trimmingCharacters(in: CharacterSet(charactersIn: ";"))
+            .lowercased()
+        return firstToken == "clear"
     }
 }
